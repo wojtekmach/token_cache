@@ -13,6 +13,7 @@ defmodule TokenCache.MixProject do
 
   def application do
     [
+      mod: {TokenCache.Application, []},
       extra_applications: [:logger]
     ]
   end

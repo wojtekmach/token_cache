@@ -12,60 +12,72 @@ end
 
 defmodule TokenCache do
   use GenServer
+  require Logger
 
   @registry TokenCache.Registry
 
   @schema [
     name: [
-      type: :atom,
-      doc: "The name of the server",
+      type: :any,
+      doc: "The name of the server.",
       required: true
     ],
     fetch: [
       type: {:fun, 0},
-      doc: "The function to fetch the token",
+      doc: """
+      The function to fetch the token.
+
+        It should return either:
+
+          * `{:ok, token, refresh_in}` where `refresh_in` is time in millseconds
+            after which the token will be automatically refreshed
+
+          * `{:error, exception}`
+      """,
       required: true
     ],
     prefetch: [
       type: {:in, [:sync, :async]},
-      doc: "How to prefetch the token",
+      doc: "How to prefetch the token.",
       default: :async
     ],
-    refresh_in: [
-      type: :timeout,
-      doc: "Time in milliseconds after which the token should be refreshed",
-      default: 5 * 60 * 1000
+    max_retries: [
+      type: :non_neg_integer,
+      doc: "The maximum number of retries on fetch errors.",
+      default: 10
+    ],
+    retry_delay: [
+      type: {:fun, 1},
+      doc: """
+      The function to calculate the delay time in milliseconds between retry attempts.
+      It receives the retry attempt number (starting at `0`) and it returns the next
+      delay time. The default function returns 1000ms, 2000ms, 4000ms, etc.
+      """
     ]
   ]
 
-  def start_link(config) when is_list(config) do
+  @doc """
+  Start the token cache server.
+
+  ## Options
+
+  #{NimbleOptions.docs(@schema)}
+  """
+  def start_link(options) when is_list(options) do
     config =
-      config
+      options
+      |> Keyword.put_new(:retry_delay, &default_retry_delay/1)
       |> NimbleOptions.validate!(@schema)
       |> Map.new()
 
     GenServer.start_link(__MODULE__, config, name: via(config.name))
   end
 
-  defp via(name) do
-    {:via, Registry, {@registry, name}}
-  end
-
-  def fetch(name) do
-    case fetch_cache(name) do
-      {:hit, token} ->
-        {:ok, token}
-
-      :miss ->
-        GenServer.call(via(name), :fetch)
-    end
-  end
-
-  def fetch!(name) do
-    case fetch(name) do
-      {:ok, token} -> token
-      {:error, exception} -> raise exception
-    end
+  @doc """
+  Fetch the token from cache.
+  """
+  def fetch(name, timeout \\ 5000) do
+    get_cache(name) || GenServer.call(via(name), :fetch, timeout)
   end
 
   @impl true
@@ -74,7 +86,14 @@ defmodule TokenCache do
 
     case config.prefetch do
       :sync ->
-        {_result, state} = fetch_token(state)
+        case fetch_token(state) do
+          {:ok, _token} ->
+            :ok
+
+          {:error, _} ->
+            schedule_refresh(0)
+        end
+
         {:ok, state}
 
       :async ->
@@ -83,52 +102,92 @@ defmodule TokenCache do
   end
 
   @impl true
-  def handle_continue(:prefetch, state) do
-    {_result, state} = fetch_token(state)
-    {:noreply, state}
-  end
-
-  @impl true
   def handle_call(:fetch, _from, state) do
-    case fetch_cache(state.config.name) do
-      {:hit, token} ->
-        {:reply, {:ok, token}, state}
+    if token = get_cache(state.config.name) do
+      {:reply, token, state}
+    else
+      case fetch_token_with_retries(state) do
+        {:ok, token} ->
+          {:reply, token, state}
 
-      :miss ->
-        {result, state} = fetch_token(state)
-        {:reply, result, state}
+        {:error, exception} ->
+          {:stop, :shutdown, exception}
+      end
     end
   end
 
   @impl true
-  def handle_info(:refetch, state) do
-    {_result, state} = fetch_token(state)
-    {:noreply, state}
+  def handle_continue(:prefetch, state) do
+    handle_refresh(state)
+  end
+
+  @impl true
+  def handle_info(:refresh, state) do
+    handle_refresh(state)
+  end
+
+  defp handle_refresh(state) do
+    case fetch_token_with_retries(state) do
+      {:ok, _token} ->
+        {:noreply, state}
+
+      {:error, exception} ->
+        {:stop, :shutdown, exception}
+    end
+  end
+
+  defp fetch_token_with_retries(state) do
+    fetch_token_with_retries(0, state)
+  end
+
+  defp fetch_token_with_retries(attempt, state) do
+    case fetch_token(state) do
+      {:ok, token} ->
+        {:ok, token}
+
+      {:error, exception} ->
+        if attempt < state.config.max_retries do
+          Process.sleep(state.config.retry_delay.(attempt))
+          fetch_token_with_retries(attempt + 1, state)
+        else
+          {:error, exception}
+        end
+    end
+  end
+
+  defp default_retry_delay(attempt) do
+    1000 * Integer.pow(attempt, 2)
   end
 
   defp fetch_token(state) do
     case state.config.fetch.() do
-      {:ok, token} ->
-        store_cache(state.config.name, token)
-        Process.send_after(self(), :refetch, state.config.refresh_in)
-        {{:ok, token}, state}
+      {:ok, token, refresh_in} ->
+        put_cache(state.config.name, token)
+        schedule_refresh(refresh_in)
+        {:ok, token}
 
-      {:error, _} = error ->
-        {error, state}
+      {:error, exception} = error ->
+        Logger.error("fetching token failed: #{Exception.message(exception)}")
+        error
     end
   end
 
-  defp fetch_cache(name) do
-    [{_pid, token}] = Registry.lookup(@registry, name)
+  defp schedule_refresh(time) do
+    Process.send_after(self(), :refresh, time)
+  end
 
-    if token do
-      {:hit, token}
-    else
-      :miss
+  defp via(name) do
+    {:via, Registry, {@registry, name}}
+  end
+
+  defp get_cache(name) do
+    case Registry.lookup(@registry, name) do
+      [{_pid, value}] -> value
+      [] -> nil
     end
   end
 
-  defp store_cache(name, token) do
+  defp put_cache(name, token) do
     Registry.update_value(@registry, name, fn _ -> token end)
   end
 end

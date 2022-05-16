@@ -12,9 +12,9 @@ end
 
 defmodule TokenCache do
   @moduledoc """
-  A simple token cache with automatic refreshes.
+  TokenCache is a simple cache server with automatic refreshes.
 
-  TokenCache supports following features:
+  It also has the following features:
 
     * sync/async prefetching
     * automatic retries on errors

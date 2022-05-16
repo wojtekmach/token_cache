@@ -11,6 +11,15 @@ defmodule TokenCache.Application do
 end
 
 defmodule TokenCache do
+  @moduledoc """
+  A simple token cache with automatic refreshes.
+
+  TokenCache supports following features:
+
+    * sync/async prefetching
+    * automatic retries on errors
+  """
+
   use GenServer
   require Logger
 

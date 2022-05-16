@@ -19,6 +19,8 @@ defmodule TokenCache.MixProject do
   end
 
   defp deps do
-    []
+    [
+      {:nimble_options, "~> 0.4.0"}
+    ]
   end
 end

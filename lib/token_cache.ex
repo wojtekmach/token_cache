@@ -15,9 +15,36 @@ defmodule TokenCache do
 
   @registry TokenCache.Registry
 
+  @schema [
+    name: [
+      type: :atom,
+      doc: "The name of the server",
+      required: true
+    ],
+    fetch: [
+      type: {:fun, 0},
+      doc: "The function to fetch the token",
+      required: true
+    ],
+    prefetch: [
+      type: {:in, [:sync, :async]},
+      doc: "How to prefetch the token",
+      default: :async
+    ],
+    refresh_in: [
+      type: :timeout,
+      doc: "Time in milliseconds after which the token should be refreshed",
+      default: 5 * 60 * 1000
+    ]
+  ]
+
   def start_link(config) when is_list(config) do
-    name = Keyword.fetch!(config, :name)
-    GenServer.start_link(__MODULE__, config, name: via(name))
+    config =
+      config
+      |> NimbleOptions.validate!(@schema)
+      |> Map.new()
+
+    GenServer.start_link(__MODULE__, config, name: via(config.name))
   end
 
   defp via(name) do
@@ -43,7 +70,6 @@ defmodule TokenCache do
 
   @impl true
   def init(config) do
-    config = struct!(TokenCache.Config, config)
     state = %{config: config}
 
     case config.prefetch do
@@ -82,9 +108,9 @@ defmodule TokenCache do
 
   defp fetch_token(state) do
     case state.config.fetch.() do
-      {:ok, %{token: _, expires_in: _} = token} ->
+      {:ok, token} ->
         store_cache(state.config.name, token)
-        Process.send_after(self(), :refetch, token.expires_in * 1000)
+        Process.send_after(self(), :refetch, state.config.refresh_in)
         {{:ok, token}, state}
 
       {:error, _} = error ->
@@ -105,10 +131,4 @@ defmodule TokenCache do
   defp store_cache(name, token) do
     Registry.update_value(@registry, name, fn _ -> token end)
   end
-end
-
-defmodule TokenCache.Config do
-  @moduledoc false
-
-  defstruct [:name, :fetch, prefetch: :async]
 end

@@ -7,9 +7,10 @@ defmodule TokenCacheTest do
     start_supervised!(
       {TokenCache,
        name: c.test,
+       refresh_in: 50,
        fetch: fn ->
          send(pid, :fetching)
-         {:ok, %{token: make_ref(), expires_in: 1}}
+         {:ok, %{token: make_ref()}}
        end}
     )
 
@@ -18,7 +19,7 @@ defmodule TokenCacheTest do
     token2 = TokenCache.fetch!(c.test)
     assert token2.token == token1.token
 
-    assert_receive :fetching, 2000
+    assert_receive :fetching
     token3 = TokenCache.fetch!(c.test)
     assert token3.token != token2.token
   end
